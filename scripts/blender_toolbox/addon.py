@@ -1755,7 +1755,7 @@ def _rig_create_armature(args: Mapping[str, Any], stable_id: Optional[str] = Non
     bpy.context.scene.collection.objects.link(obj)
     obj[_UUID_PROP] = stable_id or _stable_uuid(obj)
     obj[_SEMANTIC_PROP] = list(args.get("semantic_tags", []) or [])
-    obj.location = _length_vector(args.get("location", (0, 0, 0)), "location", frame)
+    obj.location = _point_to_world(args.get("location", (0, 0, 0)), "location", frame)
     _store_json_prop(obj, _COORDINATE_PROP, frame)
     _activate_object(obj)
     bpy.ops.object.mode_set(mode="EDIT")
@@ -1766,8 +1766,10 @@ def _rig_create_armature(args: Mapping[str, Any], stable_id: Optional[str] = Non
             if bone_name in created:
                 raise ExecutorError(f"duplicate bone name: {bone_name}", "invalid_args")
             bone = armature.edit_bones.new(bone_name)
-            bone.head = _coordinate_basis(frame) @ _length_vector(spec.get("head", (0, 0, 0)), "bones[].head", frame)
-            bone.tail = _coordinate_basis(frame) @ _length_vector(spec.get("tail", (0, 0, 1)), "bones[].tail", frame)
+            head_world = _point_to_world(spec.get("head", (0, 0, 0)), "bones[].head", frame)
+            tail_world = _point_to_world(spec.get("tail", (0, 0, 1)), "bones[].tail", frame)
+            bone.head = obj.matrix_world.inverted() @ head_world
+            bone.tail = obj.matrix_world.inverted() @ tail_world
             if (bone.tail - bone.head).length < 1e-6:
                 raise ExecutorError(f"bone must have non-zero length: {bone_name}", "invalid_args")
             created[bone_name] = bone
@@ -5629,6 +5631,7 @@ class _CoreToolboxExecutor:
                         "quality": result.get("quality"),
                         "completion_gate": bool(result.get("completion_gate", False) and result.get("gate")),
                         "quality_profile": result.get("quality_profile", self._quality_contract.get("profile", "structural")),
+                        "scope": copy.deepcopy(result.get("scope") or {}),
                     }
                     quality_result = result.get("quality")
                     if isinstance(quality_result, Mapping):
@@ -9401,6 +9404,17 @@ def _anti_slop_diagnostics(objects: Optional[Iterable[Any]] = None) -> Dict[str,
     for index, left in enumerate(visible):
         for right in visible[index + 1:]:
             item = _aabb_relationship(left, right)
+            metadata_relations = _documented_pair_relations(left, right)
+            # A declared attachment/snap must be audited even when a later
+            # transform moved the objects far apart; proximity-only scans
+            # otherwise miss the exact floating-detail failure we want to
+            # catch.
+            if metadata_relations and not all(bool(check.get("gate")) for check in metadata_relations):
+                spatial_failures.append({**item, "gate": False, "reason": "documented_relation_failed", "metadata_relations": metadata_relations})
+                continue
+            if item["parent_relation"] and item["aabb_gap"] > 0.002:
+                spatial_failures.append({**item, "gate": False, "reason": "parented_object_floating"})
+                continue
             if not (item["overlap"] or item["aabb_gap"] <= 0.05):
                 continue
             if not item["overlap"] and not ((tags.get(left.name, set()) | tags.get(right.name, set())) & {"detail", "appendage", "landmark", "feather", "accessory"}):
@@ -9408,7 +9422,7 @@ def _anti_slop_diagnostics(objects: Optional[Iterable[Any]] = None) -> Dict[str,
             # Raw parentage is ownership, never proof of physical contact.
             # Only an explicit Toolbox relation that passes its own residual,
             # normal, and clearance checks may waive an overlap blocker.
-            documented_relation = any(bool(check.get("gate")) for check in _documented_pair_relations(left, right))
+            documented_relation = any(bool(check.get("gate")) for check in metadata_relations)
             if not documented_relation:
                 spatial_failures.append({**item, "gate": False, "reason": "undocumented_spatial_pair"})
     checks["floating_details"] = {"passed": not spatial_failures, "failures": spatial_failures[:64]}
