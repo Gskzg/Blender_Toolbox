@@ -401,7 +401,8 @@ def _coordinate_system() -> Dict[str, Any]:
 
 
 def _coordinate_frame(args: Mapping[str, Any]) -> Dict[str, Any]:
-    frame = dict(args.get("coordinate_frame") or {"space": "WORLD"})
+    raw_frame = args.get("coordinate_frame")
+    frame = dict(raw_frame or {"space": "WORLD"})
     scene_frame = _coordinate_system()
     frame.setdefault("space", "WORLD")
     frame.setdefault("units", scene_frame.get("units", "meters"))
@@ -420,16 +421,56 @@ def _coordinate_frame(args: Mapping[str, Any]) -> Dict[str, Any]:
         raise ExecutorError("coordinate_frame up_axis and front_axis must be perpendicular", "invalid_args")
     frame["space"] = space
     if str(frame.get("origin", "world_origin")) == "custom":
-        custom = frame.get("custom_origin", scene_frame.get("custom_origin"))
+        explicit_custom = isinstance(raw_frame, Mapping) and "custom_origin" in raw_frame
+        custom = frame.get("custom_origin") if explicit_custom else scene_frame.get("custom_origin")
         if custom is None:
             raise ExecutorError("custom coordinate origin is not declared", "precondition_failed")
-        # custom_origin is persisted in meters, independent of the request's
-        # display units.  Keep it in the frame so replay has no hidden state.
-        # Scene custom origins are persisted in world meters.  Preserve that
-        # canonical storage instead of re-scaling them by each request's
-        # display units.
+        # Request payloads use the declared display units; the scene contract
+        # stores custom origins canonically in meters.  Scale only an origin
+        # supplied by this request, never a persisted scene origin.
+        if explicit_custom:
+            custom = _length_vector(custom, "custom_origin", frame)
         frame["custom_origin"] = [float(value) for value in custom]
     return frame
+
+
+def _coordinate_frame_with_default(args: Mapping[str, Any], default_space: str) -> Dict[str, Any]:
+    """Resolve a frame while making an operation's relative-space contract explicit.
+
+    Several relationship actions operate on points that are conventionally
+    local to an object (anchors, attachment contact points, and surface snap
+    contacts).  Their old implicit WORLD default made a visually plausible
+    payload silently land in the wrong place.  Only fill a missing ``space``;
+    an explicitly supplied space always wins and is validated normally.
+    """
+    raw = args.get("coordinate_frame")
+    if raw is None:
+        payload = dict(args)
+        payload["coordinate_frame"] = {"space": str(default_space).upper()}
+        return _coordinate_frame(payload)
+    if isinstance(raw, Mapping) and "space" not in raw:
+        payload = dict(args)
+        payload["coordinate_frame"] = {**dict(raw), "space": str(default_space).upper()}
+        return _coordinate_frame(payload)
+    return _coordinate_frame(args)
+
+
+def _canonical_world_frame(frame: Mapping[str, Any]) -> Dict[str, Any]:
+    """Describe a stored world-space point in canonical Blender meters."""
+    return {
+        "space": "WORLD", "units": "meters", "up_axis": frame.get("up_axis", "POS_Z"),
+        "front_axis": frame.get("front_axis", "NEG_Y"), "handedness": "right",
+        "origin": "world_origin",
+    }
+
+
+def _canonical_local_frame(frame: Mapping[str, Any]) -> Dict[str, Any]:
+    """Describe a stored object-local point in canonical meters."""
+    return {
+        "space": "LOCAL", "units": "meters", "up_axis": frame.get("up_axis", "POS_Z"),
+        "front_axis": frame.get("front_axis", "NEG_Y"), "handedness": "right",
+        "origin": "world_origin",
+    }
 
 
 def _coordinate_basis(frame: Optional[Mapping[str, Any]] = None) -> Any:
@@ -891,7 +932,7 @@ def _set_world_pose_from_contact(obj: Any, contact_local: Any, contact_world: An
 def _assembly_anchor_create(args: Mapping[str, Any]) -> Dict[str, Any]:
     _require_bpy()
     parent = _object_by_ref(args["parent"])
-    frame = _coordinate_frame(args)
+    frame = _coordinate_frame_with_default(args, "LOCAL")
     # Anchors are persisted in parent-local meters.  Convert declared input
     # coordinates once so later attach/verify operations share one contract.
     position_local = _point_to_object_local(parent, args["position"], frame, "position")
@@ -912,7 +953,7 @@ def _assembly_anchor_create(args: Mapping[str, Any]) -> Dict[str, Any]:
         "position": [float(v) for v in position_local],
         "normal": [round(float(v), 8) for v in normal.normalized()],
         "semantic_tags": [str(v) for v in (args.get("semantic_tags") or [])],
-        "coordinate_frame": {"space": "LOCAL", "units": "meters", "up_axis": frame.get("up_axis"), "front_axis": frame.get("front_axis")},
+        "coordinate_frame": _canonical_local_frame(frame),
     }
     _store_json_prop(parent, _ANCHORS_PROP, updated)
     return {"parent": _stable_uuid(parent), "name": str(args["name"]), "anchor": updated[str(args["name"])]}
@@ -960,7 +1001,7 @@ def _assembly_attach(args: Mapping[str, Any]) -> Dict[str, Any]:
     position_local = Vector(_as_float3(anchor.get("position"), "anchor.position"))
     normal_local = Vector(_as_float3(anchor.get("normal", (0, 0, 1)), "anchor.normal"))
     normal_world = (parent.matrix_world.to_3x3() @ normal_local).normalized()
-    frame = _coordinate_frame(args)
+    frame = _coordinate_frame_with_default(args, "LOCAL")
     clearance = _length_value(args.get("clearance", 0.0), "clearance", frame)
     contact_world = parent.matrix_world @ position_local + normal_world * clearance
     contact_local = _point_to_object_local(child, args.get("contact_point", (0, 0, 0)), frame, "contact_point")
@@ -969,7 +1010,7 @@ def _assembly_attach(args: Mapping[str, Any]) -> Dict[str, Any]:
     _store_json_prop(child, _ATTACHMENT_PROP, {
         "relation": "attached", "parent": _stable_uuid(parent), "parent_name": parent.name,
         "anchor": str(args["anchor"]), "contact_point": list(contact_local), "clearance": clearance,
-        "align_axis": str(args.get("align_axis", "Z")), "align_to_normal": bool(args.get("align_to_normal", True)), "coordinate_frame": frame,
+        "align_axis": str(args.get("align_axis", "Z")), "align_to_normal": bool(args.get("align_to_normal", True)), "coordinate_frame": _canonical_local_frame(frame),
     })
     bpy.context.view_layer.update()
     return {"child": _stable_uuid(child), "parent": _stable_uuid(parent), "anchor": str(args["anchor"]), "contact_world": [round(float(v), 8) for v in contact_world]}
@@ -992,7 +1033,7 @@ def _surface_snap(args: Mapping[str, Any]) -> Dict[str, Any]:
     tree = _surface_bvh(surface)
     if tree is None:
         raise ExecutorError("surface has no triangles", "invalid_args")
-    frame = _coordinate_frame(args)
+    frame = _coordinate_frame_with_default(args, "LOCAL")
     contact_value = args.get("contact_point", (0, 0, 0))
     space = str(frame.get("space", "WORLD")).upper()
     if space == "LOCAL":
@@ -1023,7 +1064,7 @@ def _surface_snap(args: Mapping[str, Any]) -> Dict[str, Any]:
         "contact_point": list(contact_local), "direction": list(direction), "offset": offset,
         "distance": float(distance), "normal": [round(float(v), 8) for v in normal],
         "align_axis": str(args.get("align_axis", "Z")), "align_to_normal": bool(args.get("align_to_normal", True)),
-        "coordinate_frame": frame,
+        "coordinate_frame": _canonical_local_frame(frame),
     })
     bpy.context.view_layer.update()
     return {"target": _stable_uuid(target), "surface": _stable_uuid(surface), "location": [round(float(v), 8) for v in contact_world], "normal": [round(float(v), 8) for v in normal], "distance": round(float(distance), 8)}
