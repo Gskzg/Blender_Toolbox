@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: blender-toolbox
+Version: 1.6.0
+Summary: Structured, deterministic Blender authoring runtime
+Requires-Python: <3.14,>=3.11
+Provides-Extra: test
+Requires-Dist: pytest<9,>=8; extra == "test"

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blender-toolbox"
+version = "1.6.0"
+description = "Structured, deterministic Blender authoring runtime"
+requires-python = ">=3.11,<3.14"
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
+[tool.setuptools]
+package-dir = {"" = "scripts"}
+
+[tool.setuptools.packages.find]
+where = ["scripts"]
+include = ["blender_toolbox*", "trajectory*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["scripts"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["procfunc-main", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+# These standalone launch/smoke scripts add the sibling runtime directory to
+# sys.path before importing it; E402 is intentional at that boundary.
+[tool.ruff.lint.per-file-ignores]
+"scripts/export_trajectory_dataset.py" = ["E402"]
+"scripts/smoke_*.py" = ["E402"]

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Blender Toolbox"
+  short_description: "Structured Blender modeling with a bundled Toolbox runtime"
+  default_prompt: "Use $blender-toolbox to build, inspect, verify, and export a Blender model through the bundled Toolbox runtime."

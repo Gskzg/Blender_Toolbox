@@ -1,0 +1,57 @@
+name: Blender Toolbox CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Compile Python packages
+        run: uv run --python "${{ matrix.python-version }}" python -m compileall -q scripts tests
+      - name: Run unit tests
+        run: uv run --python "${{ matrix.python-version }}" --with 'pytest>=8,<9' pytest -q tests
+      - name: Run Ruff lint
+        run: uv run --python "${{ matrix.python-version }}" --with 'ruff>=0.6,<1' ruff check scripts tests
+
+  blender:
+    name: Blender 5.1.1 headless smoke
+    runs-on: ubuntu-latest
+    env:
+      BLENDER_VERSION: "5.1.1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Blender
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          archive="$RUNNER_TEMP/blender-${BLENDER_VERSION}.tar.xz"
+          install_dir="$RUNNER_TEMP/blender"
+          curl --fail --location --retry 3 --retry-all-errors \
+            "https://download.blender.org/release/Blender5.1/blender-${BLENDER_VERSION}-linux-x64.tar.xz" \
+            --output "$archive"
+          mkdir -p "$install_dir"
+          tar -xJf "$archive" -C "$install_dir"
+          echo "BLENDER_BIN=$install_dir/blender-${BLENDER_VERSION}-linux-x64/blender" >> "$GITHUB_ENV"
+      - name: Run Blender smoke matrix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          "$BLENDER_BIN" --background --factory-startup --python scripts/smoke_batch.py
+          "$BLENDER_BIN" --background --factory-startup --python scripts/smoke_sections.py
+          "$BLENDER_BIN" --background --factory-startup --python scripts/smoke_workflow.py
+          "$BLENDER_BIN" --background --factory-startup --python scripts/smoke_recipe.py
